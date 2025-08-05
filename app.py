@@ -109,6 +109,15 @@ if st.button("Process") and uploaded is not None and password:
                 # If it's explicitly named "Unnamed: 23", still okay to drop
                 if str(unnamed_23_name).startswith("Unnamed:") or unnamed_23_name == "Unnamed: 23":
                     to_drop.append(unnamed_23_name)
+                   
+         coo_col = safe_get_col_by_name_or_index(df_hawb, "country_of_origin", 63)
+         if not coo_col:
+             coo_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 63", 63)
+         
+         if coo_col:
+             df_hawb[coo_col] = df_hawb[coo_col].astype("string")
+             df_hawb[coo_col] = df_hawb[coo_col].replace(r"^\s*$", pd.NA, regex=True)
+             df_hawb[coo_col] = df_hawb[coo_col].fillna("CN")
 
         if to_drop:
             df_hawb.drop(columns=to_drop, inplace=True, errors="ignore")
