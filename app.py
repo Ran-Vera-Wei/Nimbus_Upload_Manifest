@@ -1,4 +1,5 @@
 import io
+import re
 from typing import Optional
 
 import numpy as np
@@ -31,7 +32,6 @@ def truncate_half_if_over(s, threshold):
     return s
 
 def decrypt_xlsx(uploaded_file, password: str) -> io.BytesIO:
-    """Decrypt an uploaded XLSX (BytesIO) with a password and return a BytesIO of the decrypted file."""
     decrypted = io.BytesIO()
     office_file = msoffcrypto.OfficeFile(uploaded_file)
     office_file.load_key(password=password)
@@ -39,17 +39,56 @@ def decrypt_xlsx(uploaded_file, password: str) -> io.BytesIO:
     decrypted.seek(0)
     return decrypted
 
+def normalize_name(name: str) -> str:
+    """lowercase, strip, remove non-alphanum to make matching resilient to spaces/underscores."""
+    s = str(name).strip().lower()
+    return re.sub(r"[^a-z0-9]+", "", s)
+
 def safe_get_col_by_name_or_index(df: pd.DataFrame, preferred_name: str, index_fallback: Optional[int]):
+    """Try exact name (after strip), then index fallback."""
+    cols = [str(c).strip() for c in df.columns]
+    if preferred_name.strip() in cols:
+        return preferred_name.strip()
+    if index_fallback is not None and 0 <= int(index_fallback) < len(cols):
+        return cols[int(index_fallback)]
+    return None
+
+def get_col_fuzzy(df: pd.DataFrame, preferred_names: list[str], index_fallback: Optional[int] = None):
     """
-    Return a column name to use:
-      - If preferred_name exists, use it.
-      - Else if index_fallback is within bounds, return df.columns[index_fallback].
-      - Else return None.
+    Try exact (trimmed) names, then fuzzy normalized names, then explicit 'Unnamed: N',
+    finally raw index fallback.
     """
-    if preferred_name in df.columns:
-        return preferred_name
+    # Trim headers once
+    df.columns = pd.Index([str(c).strip() for c in df.columns])
+
+    # 1) exact
+    for name in preferred_names:
+        if name.strip() in df.columns:
+            return name.strip()
+
+    # 2) fuzzy normalized match
+    targets = [normalize_name(n) for n in preferred_names]
+    for col in df.columns:
+        if normalize_name(col) in targets:
+            return col
+
+    # 3) handle "Unnamed: N" literal in preferred_names
+    for name in preferred_names:
+        m = re.fullmatch(r"unnamed:\s*(\d+)", name.strip().lower())
+        if m:
+            n = int(m.group(1))
+            # exact literal header match
+            literal = f"Unnamed: {n}"
+            if literal in df.columns:
+                return literal
+            # or column at 0-based index n if present
+            if 0 <= n < len(df.columns):
+                return df.columns[n]
+
+    # 4) raw index fallback
     if index_fallback is not None and 0 <= int(index_fallback) < len(df.columns):
         return df.columns[int(index_fallback)]
+
     return None
 
 # ---------- UI ----------
@@ -78,17 +117,13 @@ if st.button("Process") and uploaded is not None and password:
             st.error("Sheet 'hawb' not found in the workbook.")
             st.stop()
         df_hawb = pd.read_excel(xls, sheet_name="hawb")
+        # Trim headers to avoid trailing spaces issues
+        df_hawb.columns = pd.Index([str(c).strip() for c in df_hawb.columns])
 
-        # Determine columns (prefer named; fallback to "Unnamed:X"; then index)
-        bw_col = safe_get_col_by_name_or_index(df_hawb, "manufacture_name", bw_idx)
-        if bw_col is None:
-            bw_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 74", bw_idx)
-
-        bx_col = safe_get_col_by_name_or_index(df_hawb, "manufacture_address", bx_idx)
-        if bx_col is None:
-            bx_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 75", bx_idx)
-
-        bz_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 77", bz_idx)
+        # Determine columns (prefer named; fallback)
+        bw_col = get_col_fuzzy(df_hawb, ["manufacture_name", "unnamed: 74"], bw_idx)
+        bx_col = get_col_fuzzy(df_hawb, ["manufacture_address", "unnamed: 75"], bx_idx)
+        bz_col = get_col_fuzzy(df_hawb, ["unnamed: 77"], bz_idx)
 
         # Apply truncation rules
         if bw_col in df_hawb.columns:
@@ -98,35 +133,42 @@ if st.button("Process") and uploaded is not None and password:
         if bz_col in df_hawb.columns:
             df_hawb[bz_col] = df_hawb[bz_col].apply(lambda x: truncate_half_if_over(x, 8))
 
-        # ---- Fill missing country_of_origin with "CN" ----
-        coo_col = safe_get_col_by_name_or_index(df_hawb, "country_of_origin", coo_idx)
-        if coo_col is None:
-            coo_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 63", coo_idx)
+        # ---- Set ALL country_of_origin to "CN" ----
+        coo_col = get_col_fuzzy(df_hawb, ["country_of_origin", "unnamed: 63"], coo_idx)
         if coo_col in df_hawb.columns:
-            df_hawb[coo_col] = df_hawb[coo_col].astype("string")
-            df_hawb[coo_col] = df_hawb[coo_col].replace(r"^\s*$", pd.NA, regex=True)
-            df_hawb[coo_col] = df_hawb[coo_col].fillna("CN")
+            df_hawb[coo_col] = "CN"
 
         # ---- Zip code rule: set "123456" if not exactly 6 digits ----
-        zip_col = safe_get_col_by_name_or_index(df_hawb, "manufacture_zip_code", zip_idx)
-        if zip_col is None:
-            zip_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 78", zip_idx)
+        zip_col = get_col_fuzzy(df_hawb, ["manufacture_zip_code", "manufacture_zip_code ", "unnamed: 78"], zip_idx)
+        before_zip_sample = None
         if zip_col in df_hawb.columns:
+            # sample before
+            before_zip_sample = df_hawb[zip_col].head(5).tolist()
+
+            # normalize dtype to string for regex
             df_hawb[zip_col] = df_hawb[zip_col].astype("string")
+
+            # Treat blanks as NA for easier logic
             df_hawb[zip_col] = df_hawb[zip_col].replace(r"^\s*$", pd.NA, regex=True)
-            mask_invalid = ~df_hawb[zip_col].str.match(r"^\d{6}$", na=False)
-            df_hawb.loc[mask_invalid, zip_col] = "123456"
+
+            # Valid = exactly 6 digits
+            is_valid = df_hawb[zip_col].str.match(r"^\d{6}$", na=False)
+
+            # Everything else -> "123456"
+            df_hawb.loc[~is_valid, zip_col] = "123456"
 
         # ---- Remove STATE or unnamed column at index 23 ----
         to_drop = []
         if "STATE" in df_hawb.columns:
             to_drop.append("STATE")
+        # unnamed fallback (avoid dropping zip column by accident)
         if 0 <= int(unnamed_state_idx) < len(df_hawb.columns):
             fallback_colname = df_hawb.columns[int(unnamed_state_idx)]
             if (
                 fallback_colname in df_hawb.columns
                 and fallback_colname not in to_drop
                 and (str(fallback_colname).startswith("Unnamed:") or fallback_colname == "Unnamed: 23")
+                and fallback_colname != zip_col
             ):
                 to_drop.append(fallback_colname)
         if to_drop:
@@ -137,6 +179,7 @@ if st.button("Process") and uploaded is not None and password:
             st.error("Sheet 'mawb' not found in the workbook.")
             st.stop()
         df_mawb = pd.read_excel(xls, sheet_name="mawb")
+        df_mawb.columns = pd.Index([str(c).strip() for c in df_mawb.columns])
 
         # Set L2 (Excel) => row index 0 in pandas for column 'consignee_id_number'
         if "consignee_id_number" not in df_mawb.columns:
@@ -165,7 +208,20 @@ if st.button("Process") and uploaded is not None and password:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        # Optional previews
+        # Debug + previews
+        with st.expander("Debug / Column selections"):
+            st.write({
+                "bw_col": bw_col,
+                "bx_col": bx_col,
+                "bz_col": bz_col,
+                "coo_col": coo_col,
+                "zip_col": zip_col,
+                "dropped_columns": to_drop,
+            })
+            if zip_col in df_hawb.columns:
+                st.write("Zip sample before:", before_zip_sample)
+                st.write("Zip sample after:", df_hawb[zip_col].head(5).tolist())
+
         with st.expander("Preview (first 10 rows) – hawb"):
             st.dataframe(df_hawb.head(10))
         with st.expander("Preview (first 10 rows) – mawb"):
