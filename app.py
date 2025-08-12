@@ -14,7 +14,7 @@ st.markdown("""
 **Rules (apply to `hawb`, starting from row 3):**
 - `manufacture_name` : if length > 100 → keep first half
 - `manufacture_address` : if length > 225 → keep first half
-- `manufacture_state`: if length > 8 → keep first half
+- `manufacture_state`: **delete everything after the first space**, then if length > 8 → keep first half
 - **Set all `country_of_origin` to "CN"**
 - **Set all `manufacture_country` to "CN"**
 - **Zip** (`manufacture_zip_code`): if not exactly 6 digits → **"123456"**
@@ -68,9 +68,23 @@ def find_col_index_from_header_row(header_row: pd.Series, candidates: List[str],
     return None
 
 def truncate_half_if_over_val(x, thresh: int):
+    # keep your original behavior: only truncate strings
     if isinstance(x, str) and len(x) > thresh:
         return x[: len(x)//2]
     return x
+
+# NEW: normalize any unicode whitespace to a single space, then keep only the first token
+SPACE_FIX_RE = re.compile(r"[\u00A0\u1680\u180E\u2000-\u200B\u202F\u205F\u3000]+")
+def first_token_clean(x):
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return x
+    s = str(x)
+    # collapse odd spaces to a normal space and strip ends
+    s = SPACE_FIX_RE.sub(" ", s).strip()
+    # keep text before the first space (if any)
+    if " " in s:
+        s = s.split(" ", 1)[0]
+    return s
 
 # ---------- UI ----------
 uploaded = st.file_uploader("Upload password-protected .xlsx", type=["xlsx"])
@@ -107,7 +121,7 @@ if st.button("Process") and uploaded and password:
         # find needed column indices by header2
         bw_j = find_col_index_from_header_row(header2, ["manufacture_name", "unnamed: 74"], bw_idx)
         bx_j = find_col_index_from_header_row(header2, ["manufacture_address", "unnamed: 75"], bx_idx)
-        bz_j = find_col_index_from_header_row(header2, ["manufacture_state", "unnamed: 77"], bz_idx)
+        bz_j = find_col_index_from_header_row(header2, ["manufacture_state", "manufacture_state ", "unnamed: 77"], bz_idx)
         coo_j = find_col_index_from_header_row(header2, ["country_of_origin", "unnamed: 63"], coo_idx)
         mao_j = find_col_index_from_header_row(header2, ["manufacture_country", "unnamed: 79"], mao_idx)
         zip_j = find_col_index_from_header_row(header2, ["manufacture_zip_code", "manufacture_zip_code ", "unnamed: 78"], zip_idx)
@@ -118,8 +132,13 @@ if st.button("Process") and uploaded and password:
             hawb_raw.iloc[data_start:, bw_j] = hawb_raw.iloc[data_start:, bw_j].apply(lambda v: truncate_half_if_over_val(v, 100))
         if bx_j is not None and bx_j < hawb_raw.shape[1]:
             hawb_raw.iloc[data_start:, bx_j] = hawb_raw.iloc[data_start:, bx_j].apply(lambda v: truncate_half_if_over_val(v, 225))
+
+        # NEW: manufacture_state -> first token (before first space), THEN half if > 8
         if bz_j is not None and bz_j < hawb_raw.shape[1]:
-            hawb_raw.iloc[data_start:, bz_j] = hawb_raw.iloc[data_start:, bz_j].apply(lambda v: truncate_half_if_over_val(v, 8))
+            col_state = hawb_raw.iloc[data_start:, bz_j]
+            col_state = col_state.apply(first_token_clean)                 # delete after first space
+            col_state = col_state.apply(lambda v: truncate_half_if_over_val(v, 8))  # keep half if > 8
+            hawb_raw.iloc[data_start:, bz_j] = col_state
 
         # country_of_origin -> "CN" for all rows from row 3
         if coo_j is not None and coo_j < hawb_raw.shape[1]:
