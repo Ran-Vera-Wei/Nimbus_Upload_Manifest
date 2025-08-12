@@ -70,9 +70,10 @@ def find_col_index_from_header_row(header_row: pd.Series, candidates: List[str],
 def truncate_half_if_over_val(x, thresh: int):
     if pd.isna(x):
         return x
-    s = str(x)
+    s = str(x).strip()
     if len(s) > thresh:
-        return s[: len(s)//2]
+        half = len(s) // 2
+        return s[:half].rstrip()  # drop any trailing space after cut
     return s
 
 # ---------- UI ----------
@@ -110,7 +111,7 @@ if st.button("Process") and uploaded and password:
         # find needed column indices by header2
         bw_j = find_col_index_from_header_row(header2, ["manufacture_name", "unnamed: 74"], bw_idx)
         bx_j = find_col_index_from_header_row(header2, ["manufacture_address", "unnamed: 75"], bx_idx)
-        bz_j = find_col_index_from_header_row(header2, ["manufacture_state", "manufacture_state ", "Manufacture State", "unnamed: 77"], bz_idx)
+        bz_j = find_col_index_from_header_row(header2, ["manufacture_state", "unnamed: 77"], bz_idx)
         coo_j = find_col_index_from_header_row(header2, ["country_of_origin", "unnamed: 63"], coo_idx)
         mao_j = find_col_index_from_header_row(header2, ["manufacture_country", "unnamed: 79"], mao_idx)
         zip_j = find_col_index_from_header_row(header2, ["manufacture_zip_code", "manufacture_zip_code ", "unnamed: 78"], zip_idx)
