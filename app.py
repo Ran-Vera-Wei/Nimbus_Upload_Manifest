@@ -18,7 +18,7 @@ st.markdown("""
 - **Set all `country_of_origin` to "CN"**
 - **Set all `manufacture_country` to "CN"**
 - **Zip** (`manufacture_zip_code` or `Unnamed: 78`): if not exactly 6 digits → **"123456"**
-- Drop `STATE` column (or unnamed index 23) entirely
+- Drop `recipient_state` column entirely
 
 **Rules (apply to `Mawb`):**
 - set L2 (`consignee_id_number`) to `2567704`
@@ -77,13 +77,13 @@ uploaded = st.file_uploader("Upload password-protected .xlsx", type=["xlsx"])
 password = st.text_input("Password", type="password", value="_S8&Dwy2&U")
 
 with st.expander("Advanced (0-based index fallbacks)"):
-    bw_idx = st.number_input("BW (manufacture_name) fallback index", min_value=0, value=74, step=1)
-    bx_idx = st.number_input("BX (manufacture_address) fallback index", min_value=0, value=75, step=1)
-    bz_idx = st.number_input("BZ (optional extra truncation) fallback index", min_value=0, value=77, step=1)
-    coo_idx = st.number_input("country_of_origin fallback index (≈ Unnamed: 63)", min_value=0, value=63, step=1)
-    mao_idx = st.number_input("country_of_origin fallback index (≈ Unnamed: 79)", min_value=0, value=79, step=1)
-    zip_idx = st.number_input("manufacture_zip_code fallback index (≈ Unnamed: 78)", min_value=0, value=78, step=1)
-    unnamed_state_idx = st.number_input("Unnamed state col index (commonly 23)", min_value=0, value=23, step=1)
+    bw_idx = st.number_input("manufacture_name fallback index", min_value=0, value=74, step=1)
+    bx_idx = st.number_input("manufacture_address fallback index", min_value=0, value=75, step=1)
+    bz_idx = st.number_input("manufacture_state fallback index", min_value=0, value=77, step=1)
+    coo_idx = st.number_input("country_of_origin fallback index", min_value=0, value=63, step=1)
+    mao_idx = st.number_input("manufacture_country fallback index", min_value=0, value=79, step=1)
+    zip_idx = st.number_input("manufacture_zip_code fallback index", min_value=0, value=78, step=1)
+    unnamed_state_idx = st.number_input("recipient_state col index", min_value=0, value=23, step=1)
 
 if st.button("Process") and uploaded and password:
     try:
