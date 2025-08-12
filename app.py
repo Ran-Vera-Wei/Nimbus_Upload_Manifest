@@ -94,15 +94,10 @@ if st.button("Process") and uploaded is not None and password:
         if bz_col in df_hawb.columns:
             df_hawb[bz_col] = df_hawb[bz_col].apply(lambda x: truncate_half_if_over(x, 8))
 
-        # ---- Fill missing country_of_origin with "CN" ----
-        # Try named first, then Unnamed: 63, then index fallback
-        coo_col = safe_get_col_by_name_or_index(df_hawb, "country_of_origin", coo_idx)
-        if coo_col is None:
-            coo_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 63", coo_idx)
+        # ---- Set ALL country_of_origin to "CN" ----
+        coo_col = get_col_fuzzy(df_hawb, ["country_of_origin", "unnamed: 63"], coo_idx)
         if coo_col in df_hawb.columns:
-            df_hawb[coo_col] = df_hawb[coo_col].astype("string")
-            df_hawb[coo_col] = df_hawb[coo_col].replace(r"^\s*$", pd.NA, regex=True)
-            df_hawb[coo_col] = df_hawb[coo_col].fillna("CN")
+            df_hawb[coo_col] = "CN"
 
         # ---- Remove STATE or unnamed column at index 23 ----
         to_drop = []
