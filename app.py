@@ -1,207 +1,198 @@
 import io
 import re
+from typing import Optional, List
+
 import numpy as np
 import pandas as pd
 import msoffcrypto
 import streamlit as st
-from openpyxl import load_workbook
 
-# ======================
-# Streamlit UI
-# ======================
-st.set_page_config(page_title="Excel Converter (Decrypt + Transform)", page_icon="📄")
+st.set_page_config(page_title="Excel Converter", page_icon="📄")
 st.title("📄 Excel Converter (Password Remove + Transform)")
 
 st.markdown("""
-**This app will:**
-1) Decrypt an uploaded **.xlsx** using the password you provide  
-2) On **hawb**: treat row 2 as headers and process data from row 3; apply your requested transforms  
-3) On **mawb**: set **L2** (under `consignee_id_number`) to **2567704**  
-4) Provide a clean workbook for download
+**Rules (apply to `hawb`, starting from row 3):**
+- `manufacture_name` : if length > 100 → keep first half
+- `manufacture_address` : if length > 225 → keep first half
+- `Umanufacture_state`: if length > 8 → keep first half
+- **Set all `country_of_origin` to "CN"**
+- **Set all `manufacture_country` to "CN"**
+- **Zip** (`manufacture_zip_code` or `Unnamed: 78`): if not exactly 6 digits → **"123456"**
+- Drop `STATE` column (or unnamed index 23) entirely
+
+**Rules (apply to `Mawb`):**
+- set L2 (`consignee_id_number`) to `2567704`
 """)
 
-default_pw = "_S8&Dwy2&U"
-password = st.text_input("File password", value=default_pw, type="password")
+# ---------- Helpers ----------
+def decrypt_xlsx(uploaded_file, password: str) -> io.BytesIO:
+    buf = io.BytesIO()
+    of = msoffcrypto.OfficeFile(uploaded_file)
+    of.load_key(password=password)
+    of.decrypt(buf)
+    buf.seek(0)
+    return buf
+
+def norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+
+def find_col_index_from_header_row(header_row: pd.Series, candidates: List[str], index_fallback: Optional[int]=None) -> Optional[int]:
+    """
+    Given the SECOND row (real headers), find the column index matching:
+      exact -> normalized -> 'Unnamed: N' literal or that position -> fallback index
+    Returns 0-based column index or None.
+    """
+    headers = [str(x).strip() for x in header_row.values]
+    # exact
+    for c in candidates:
+        if str(c).strip() in headers:
+            return headers.index(str(c).strip())
+    # normalized fuzzy
+    target_norms = {norm(c) for c in candidates}
+    for j, h in enumerate(headers):
+        if norm(h) in target_norms:
+            return j
+    # explicit Unnamed:N
+    for c in candidates:
+        m = re.fullmatch(r"unnamed:\s*(\d+)", str(c).strip().lower())
+        if m:
+            n = int(m.group(1))
+            literal = f"Unnamed: {n}"
+            if literal in headers:
+                return headers.index(literal)
+            if 0 <= n < len(headers):
+                return n
+    # fallback index
+    if index_fallback is not None and 0 <= int(index_fallback) < len(headers):
+        return int(index_fallback)
+    return None
+
+def truncate_half_if_over_val(x, thresh: int):
+    if isinstance(x, str) and len(x) > thresh:
+        return x[: len(x)//2]
+    return x
+
+# ---------- UI ----------
 uploaded = st.file_uploader("Upload password-protected .xlsx", type=["xlsx"])
-run_btn = st.button("Convert")
+password = st.text_input("Password", type="password", value="_S8&Dwy2&U")
 
-# ======================
-# Helpers
-# ======================
-def decrypt_xlsx(file_bytes: bytes, password: str) -> bytes:
-    """Return decrypted xlsx as bytes."""
-    fin = io.BytesIO(file_bytes)
-    fout = io.BytesIO()
-    office_file = msoffcrypto.OfficeFile(fin)
-    office_file.load_key(password=password)
-    office_file.decrypt(fout)
-    return fout.getvalue()
+with st.expander("Advanced (0-based index fallbacks)"):
+    bw_idx = st.number_input("BW (manufacture_name) fallback index", min_value=0, value=74, step=1)
+    bx_idx = st.number_input("BX (manufacture_address) fallback index", min_value=0, value=75, step=1)
+    bz_idx = st.number_input("BZ (optional extra truncation) fallback index", min_value=0, value=77, step=1)
+    coo_idx = st.number_input("country_of_origin fallback index (≈ Unnamed: 63)", min_value=0, value=63, step=1)
+    mao_idx = st.number_input("country_of_origin fallback index (≈ Unnamed: 79)", min_value=0, value=79, step=1)
+    zip_idx = st.number_input("manufacture_zip_code fallback index (≈ Unnamed: 78)", min_value=0, value=78, step=1)
+    unnamed_state_idx = st.number_input("Unnamed state col index (commonly 23)", min_value=0, value=23, step=1)
 
-def normalize_map(cols):
-    """Map normalized (lower, trimmed) -> original column names."""
-    mapping = {}
-    for c in cols:
-        key = str(c).strip().lower()
-        mapping.setdefault(key, c)
-    return mapping
-
-def find_col(cols_map, name):
-    """Find original column by case-insensitive, trimmed match."""
-    return cols_map.get(str(name).strip().lower(), None)
-
-def keep_half_if_over(s, limit):
-    """If len(s) > limit, keep first half (floor on odd); else return original."""
-    if pd.isna(s):
-        return s
-    s = str(s)
-    return s[: len(s) // 2] if len(s) > limit else s
-
-def enforce_zip_6_digits(x):
-    """If not exactly 6 digits, set to '123456'."""
-    if pd.isna(x):
-        return "123456"
-    s = str(x).strip()
-    return s if re.fullmatch(r"\d{6}", s) else "123456"
-
-def ensure_at_least_one_visible_and_active(wb):
-    """OpenPyXL requires at least one visible sheet and an active index."""
-    for ws in wb.worksheets:
-        ws.sheet_state = "visible"
-    wb.active = 0
-
-# ======================
-# Main
-# ======================
-if run_btn:
-    if not uploaded:
-        st.warning("Please upload a .xlsx file first.")
-        st.stop()
-    if not password:
-        st.warning("Please enter the password.")
-        st.stop()
-
+if st.button("Process") and uploaded and password:
     try:
-        with st.spinner("Decrypting..."):
-            decrypted = decrypt_xlsx(uploaded.read(), password)
+        dec = decrypt_xlsx(uploaded, password)
+        xls = pd.ExcelFile(dec, engine="openpyxl")
 
-        # Load workbook once to edit mawb and to preserve other sheets
-        wb = load_workbook(io.BytesIO(decrypted))
+        # ---------- HAWB: keep both header rows intact ----------
+        if "hawb" not in xls.sheet_names:
+            st.error("Sheet 'hawb' not found.")
+            st.stop()
 
-        # ---- mawb: set L2 (under consignee_id_number) to 2567704 ----
-        if "mawb" in wb.sheetnames:
-            ws = wb["mawb"]
-            ws["L2"].value = "2567704"
+        # Read raw to keep rows 1&2 untouched
+        hawb_raw = pd.read_excel(xls, sheet_name="hawb", header=None, dtype=object)
+        if hawb_raw.shape[0] < 2:
+            st.error("`hawb` has fewer than 2 rows.")
+            st.stop()
+
+        header2 = hawb_raw.iloc[1]  # second row = real headers
+        data_start = 2              # we edit from row index 2 (third row)
+
+        # find needed column indices by header2
+        bw_j = find_col_index_from_header_row(header2, ["manufacture_name", "unnamed: 74"], bw_idx)
+        bx_j = find_col_index_from_header_row(header2, ["manufacture_address", "unnamed: 75"], bx_idx)
+        bz_j = find_col_index_from_header_row(header2, ["unnamed: 77"], bz_idx)
+        coo_j = find_col_index_from_header_row(header2, ["country_of_origin", "unnamed: 63"], coo_idx)
+        mao_j = find_col_index_from_header_row(header2, ["manufacture_country", "unnamed: 79"], mao_idx)
+        zip_j = find_col_index_from_header_row(header2, ["manufacture_zip_code", "manufacture_zip_code ", "unnamed: 78"], zip_idx)
+
+        # Apply rules directly on hawb_raw rows >= data_start
+        # Truncations
+        if bw_j is not None and bw_j < hawb_raw.shape[1]:
+            hawb_raw.iloc[data_start:, bw_j] = hawb_raw.iloc[data_start:, bw_j].apply(lambda v: truncate_half_if_over_val(v, 100))
+        if bx_j is not None and bx_j < hawb_raw.shape[1]:
+            hawb_raw.iloc[data_start:, bx_j] = hawb_raw.iloc[data_start:, bx_j].apply(lambda v: truncate_half_if_over_val(v, 225))
+        if bz_j is not None and bz_j < hawb_raw.shape[1]:
+            hawb_raw.iloc[data_start:, bz_j] = hawb_raw.iloc[data_start:, bz_j].apply(lambda v: truncate_half_if_over_val(v, 8))
+
+        # country_of_origin -> "CN" for all rows from row 3
+        if coo_j is not None and coo_j < hawb_raw.shape[1]:
+            hawb_raw.iloc[data_start:, coo_j] = "CN"
+        
+        # manufacture_country -> "CN" for all rows from row 3
+        if mao_j is not None and mao_j < hawb_raw.shape[1]:
+            hawb_raw.iloc[data_start:, mao_j] = "CN"
+
+        # zip: non-6-digits -> "123456" (rows from row 3)
+        if zip_j is not None and zip_j < hawb_raw.shape[1]:
+            col = hawb_raw.iloc[data_start:, zip_j].astype("string")
+            col = col.replace(r"^\s*$", pd.NA, regex=True)
+            valid = col.str.match(r"^\d{6}$", na=False)
+            col.loc[~valid] = "123456"
+            hawb_raw.iloc[data_start:, zip_j] = col
+
+        # Drop STATE column (by checking header2) OR unnamed index 23
+        drop_indices = []
+        for j, name in enumerate([str(x).strip() for x in header2.values]):
+            if name == "STATE":
+                drop_indices.append(j)
+        if 0 <= int(unnamed_state_idx) < hawb_raw.shape[1] and int(unnamed_state_idx) not in drop_indices:
+            drop_indices.append(int(unnamed_state_idx))
+        if drop_indices:
+            keep = [j for j in range(hawb_raw.shape[1]) if j not in drop_indices]
+            hawb_raw = hawb_raw.iloc[:, keep]
+
+        # ---------- MAWB ----------
+        if "mawb" not in xls.sheet_names:
+            st.error("Sheet 'mawb' not found.")
+            st.stop()
+
+        df_mawb = pd.read_excel(xls, sheet_name="mawb")
+        df_mawb.columns = pd.Index([str(c).strip() for c in df_mawb.columns])
+
+        if "consignee_id_number" not in df_mawb.columns:
+            if len(df_mawb) == 0:
+                df_mawb = pd.DataFrame({"consignee_id_number": ["2567704"]})
+            else:
+                df_mawb.loc[0, "consignee_id_number"] = "2567704"
         else:
-            st.warning("Sheet 'mawb' not found. Skipping mawb update.")
+            if len(df_mawb) == 0:
+                df_mawb.loc[0, "consignee_id_number"] = "2567704"
+            else:
+                df_mawb.iloc[0, df_mawb.columns.get_loc("consignee_id_number")] = "2567704"
 
-        # ---- hawb: two header rows; row 2 = headers, data starts row 3 ----
-        if "hawb" not in wb.sheetnames:
-            st.error("Sheet 'hawb' not found in workbook.")
-            st.stop()
+        # ---------- Write workbook ----------
+        out_buf = io.BytesIO()
+        with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
+            # Write hawb exactly as matrix (keeps both header rows)
+            hawb_raw.to_excel(writer, sheet_name="hawb", header=False, index=False)
+            df_mawb.to_excel(writer, sheet_name="mawb", index=False)
+        out_buf.seek(0)
 
-        raw_hawb = pd.read_excel(io.BytesIO(decrypted), sheet_name="hawb", header=None, dtype=str)
-        if raw_hawb.shape[0] < 2:
-            st.error("The 'hawb' sheet does not contain at least two header rows.")
-            st.stop()
-
-        # Build the dataframe using second row as header
-        new_cols = raw_hawb.iloc[1].astype(str).tolist()
-        hawb_df = raw_hawb.iloc[2:].copy()  # data from 3rd row
-        hawb_df.columns = new_cols
-        hawb_df.reset_index(drop=True, inplace=True)
-
-        # Column mapping tolerant to case/space
-        colmap = normalize_map(hawb_df.columns)
-
-        # 1) Half-length trimming
-        col_manu_name = find_col(colmap, "manufacture_name")
-        if col_manu_name in hawb_df.columns:
-            hawb_df[col_manu_name] = hawb_df[col_manu_name].apply(lambda x: keep_half_if_over(x, 100))
-
-        col_manu_addr = find_col(colmap, "manufacture_address")
-        if col_manu_addr in hawb_df.columns:
-            hawb_df[col_manu_addr] = hawb_df[col_manu_addr].apply(lambda x: keep_half_if_over(x, 225))
-
-        col_manu_state = find_col(colmap, "manufacture_state")
-        if col_manu_state in hawb_df.columns:
-            hawb_df[col_manu_state] = hawb_df[col_manu_state].apply(lambda x: keep_half_if_over(x, 8))
-
-        # 2) Set country columns to "CN"
-        for cname in ["country_of_origin", "manufacture_country"]:
-            c = find_col(colmap, cname)
-            if c in hawb_df.columns:
-                hawb_df[c] = "CN"
-
-        # 3) Zip: if not exactly 6 digits, set to "123456"
-        col_zip_exact = find_col(colmap, "manufacture_zip_code ")
-        col_zip_trim = find_col(colmap, "manufacture_zip_code")
-        col_zip = col_zip_exact if (col_zip_exact in hawb_df.columns) else col_zip_trim
-        if col_zip in hawb_df.columns:
-            hawb_df[col_zip] = hawb_df[col_zip].apply(enforce_zip_6_digits)
-
-        # 4) Drop recipient_state entirely
-        col_recipient_state = find_col(colmap, "recipient_state")
-        if col_recipient_state in hawb_df.columns:
-            hawb_df.drop(columns=[col_recipient_state], inplace=True)
-
-        # ---- Write back with visibility/active-sheet guards ----
-        ensure_at_least_one_visible_and_active(wb)  # before any save
-
-        # Save current edited wb (with mawb updated) to bytes
-        base = io.BytesIO()
-        wb.save(base)
-
-        # Now open with pandas' ExcelWriter and replace hawb
-        out_io = io.BytesIO()
-        with pd.ExcelWriter(out_io, engine="openpyxl") as writer:
-            writer.book = load_workbook(io.BytesIO(base.getvalue()))
-            writer.sheets = {ws.title: ws for ws in writer.book.worksheets}
-
-            # If hawb exists, delete then write fresh
-            if "hawb" in writer.book.sheetnames:
-                del writer.book["hawb"]
-
-            # If deleting hawb leaves no visible sheets, create a temp
-            if not any(ws.sheet_state == "visible" for ws in writer.book.worksheets):
-                writer.book.create_sheet("TempVisible")
-            writer.book.active = 0
-
-            # Write new hawb
-            hawb_df.to_excel(writer, sheet_name="hawb", index=False)
-
-            # Clean up temp if created
-            if "TempVisible" in writer.book.sheetnames:
-                del writer.book["TempVisible"]
-
-            # Final safety: ensure visibility and set hawb active
-            for ws in writer.book.worksheets:
-                ws.sheet_state = "visible"
-            writer.book.active = max(0, writer.book.sheetnames.index("hawb"))
-
-            writer.save()
-
-        st.success("Conversion complete!")
+        st.success("Done! Download your converted file below.")
         st.download_button(
-            "Download converted file",
-            data=out_io.getvalue(),
+            "⬇️ Download converted.xlsx",
+            data=out_buf,
             file_name="converted.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        with st.expander("What was applied"):
-            st.write("""
-- Decrypted the workbook
-- **hawb**: used row 2 as headers; processed from row 3
-  - If `manufacture_name` length > 100 → kept first half
-  - If `manufacture_address` length > 225 → kept first half
-  - If `manufacture_state` length > 8 → kept first half
-  - Set `country_of_origin` and `manufacture_country` to `"CN"`
-  - If `manufacture_zip_code` (with or without trailing space) not exactly 6 digits → set to `"123456"`
-  - Dropped `recipient_state`
-- **mawb**: set **L2** to `2567704`
-""")
+        with st.expander("Debug"):
+            st.write({
+                "hawb_shape": tuple(hawb_raw.shape),
+                "bw_idx": bw_j, "bx_idx": bx_j, "bz_idx": bz_j,
+                "coo_idx": coo_j, "zip_idx": zip_j,
+                "dropped_indices": drop_indices
+            })
+            st.write("Row 2 headers (real):", [str(x).strip() for x in header2.values])
 
-    except msoffcrypto.exceptions.DecryptionError:
-        st.error("Decryption failed. Please verify the password.")
     except Exception as e:
-        st.exception(e)
+        st.error(f"Processing failed: {e}")
+else:
+    st.info("Upload a file, enter the password, then click **Process**.")
