@@ -111,12 +111,3 @@ if run_btn:
         hawb_df.reset_index(drop=True, inplace=True)
 
         # Column mapping tolerant to case/space
-        colmap = normalize_map(hawb_df.columns)
-
-        # 1) Half-length trimming
-        col_manu_name = find_col(colmap, "manufacture_name")
-        if col_manu_name in hawb_df.columns:
-            hawb_df[col_manu_name] = hawb_df[col_manu_name].apply(lambda x: keep_half_if_over(x, 100))
-
-        col_manu_addr = find_col(colmap, "manufacture_address")
-        if col_manu_addr in hawb
