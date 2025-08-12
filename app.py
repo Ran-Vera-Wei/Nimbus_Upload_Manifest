@@ -103,7 +103,18 @@ if st.button("Process") and uploaded is not None and password:
             df_hawb[coo_col] = df_hawb[coo_col].astype("string")
             df_hawb[coo_col] = df_hawb[coo_col].replace(r"^\s*$", pd.NA, regex=True)
             df_hawb[coo_col] = df_hawb[coo_col].fillna("CN")
-
+           
+        # ---- Fill manufacture_zip_code with "123456" if not 6 digits ----
+         zip_col = safe_get_col_by_name_or_index(df_hawb, "manufacture_zip_code", 78)
+         if zip_col is None:
+             zip_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 78", 78)
+         if zip_col in df_hawb.columns:
+             df_hawb[zip_col] = df_hawb[zip_col].astype("string")
+             # Treat non-6-digit values (including NaN/empty) as invalid
+             df_hawb[zip_col] = df_hawb[zip_col].replace(r"^\s*$", pd.NA, regex=True)
+             mask_invalid = ~df_hawb[zip_col].str.match(r"^\d{6}$", na=False)
+             df_hawb.loc[mask_invalid, zip_col] = "123456"
+        
         # ---- Remove STATE or unnamed column at index 23 ----
         to_drop = []
         if "STATE" in df_hawb.columns:
