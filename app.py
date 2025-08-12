@@ -14,7 +14,7 @@ st.markdown("""
 **Rules (apply to `hawb`, starting from row 3):**
 - `manufacture_name` : if length > 100 → keep first half
 - `manufacture_address` : if length > 225 → keep first half
-- `Umanufacture_state`: if length > 8 → keep first half
+- `manufacture_state`: if length > 8 → keep first half
 - **Set all `country_of_origin` to "CN"**
 - **Set all `manufacture_country` to "CN"**
 - **Zip** (`manufacture_zip_code` or `Unnamed: 78`): if not exactly 6 digits → **"123456"**
@@ -107,7 +107,7 @@ if st.button("Process") and uploaded and password:
         # find needed column indices by header2
         bw_j = find_col_index_from_header_row(header2, ["manufacture_name", "unnamed: 74"], bw_idx)
         bx_j = find_col_index_from_header_row(header2, ["manufacture_address", "unnamed: 75"], bx_idx)
-        bz_j = find_col_index_from_header_row(header2, ["unnamed: 77"], bz_idx)
+        bz_j = find_col_index_from_header_row(header2, ["manufacture_state", "unnamed: 77"], bz_idx)
         coo_j = find_col_index_from_header_row(header2, ["country_of_origin", "unnamed: 63"], coo_idx)
         mao_j = find_col_index_from_header_row(header2, ["manufacture_country", "unnamed: 79"], mao_idx)
         zip_j = find_col_index_from_header_row(header2, ["manufacture_zip_code", "manufacture_zip_code ", "unnamed: 78"], zip_idx)
