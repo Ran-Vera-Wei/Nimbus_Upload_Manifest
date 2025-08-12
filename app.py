@@ -75,6 +75,18 @@ def truncate_half_if_over_val(x, thresh: int):
         half = len(s) // 2
         return s[:half].rstrip()  # drop any trailing space after cut
     return s
+    
+SPACE_FIX_RE = re.compile(r"[\u00A0\u1680\u180E\u2000-\u200B\u202F\u205F\u3000\s]+")
+def truncate_state_half_clean(x, thresh: int = 8):
+    if pd.isna(x):
+        return x
+    s = str(x)
+    # normalize ALL unicode spaces to a single regular space
+    s = SPACE_FIX_RE.sub(" ", s).strip()
+    if len(s) > thresh:
+        half = len(s) // 2
+        return s[:half].rstrip()
+    return s
 
 # ---------- UI ----------
 uploaded = st.file_uploader("Upload password-protected .xlsx", type=["xlsx"])
@@ -123,7 +135,7 @@ if st.button("Process") and uploaded and password:
         if bx_j is not None and bx_j < hawb_raw.shape[1]:
             hawb_raw.iloc[data_start:, bx_j] = hawb_raw.iloc[data_start:, bx_j].apply(lambda v: truncate_half_if_over_val(v, 225))
         if bz_j is not None and bz_j < hawb_raw.shape[1]:
-            hawb_raw.iloc[data_start:, bz_j] = hawb_raw.iloc[data_start:, bz_j].apply(lambda v: truncate_half_if_over_val(v, 8))
+            hawb_raw.iloc[data_start:, bz_j] = (hawb_raw.iloc[data_start:, bz_j].apply(truncate_state_half_clean))
 
         # country_of_origin -> "CN" for all rows from row 3
         if coo_j is not None and coo_j < hawb_raw.shape[1]:
