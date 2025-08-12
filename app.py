@@ -111,3 +111,97 @@ if run_btn:
         hawb_df.reset_index(drop=True, inplace=True)
 
         # Column mapping tolerant to case/space
+        colmap = normalize_map(hawb_df.columns)
+
+        # 1) Half-length trimming
+        col_manu_name = find_col(colmap, "manufacture_name")
+        if col_manu_name in hawb_df.columns:
+            hawb_df[col_manu_name] = hawb_df[col_manu_name].apply(lambda x: keep_half_if_over(x, 100))
+
+        col_manu_addr = find_col(colmap, "manufacture_address")
+        if col_manu_addr in hawb_df.columns:
+            hawb_df[col_manu_addr] = hawb_df[col_manu_addr].apply(lambda x: keep_half_if_over(x, 225))
+
+        col_manu_state = find_col(colmap, "manufacture_state")
+        if col_manu_state in hawb_df.columns:
+            hawb_df[col_manu_state] = hawb_df[col_manu_state].apply(lambda x: keep_half_if_over(x, 8))
+
+        # 2) Set country columns to "CN"
+        for cname in ["country_of_origin", "manufacture_country"]:
+            c = find_col(colmap, cname)
+            if c in hawb_df.columns:
+                hawb_df[c] = "CN"
+
+        # 3) Zip: if not exactly 6 digits, set to "123456"
+        col_zip_exact = find_col(colmap, "manufacture_zip_code ")
+        col_zip_trim = find_col(colmap, "manufacture_zip_code")
+        col_zip = col_zip_exact if (col_zip_exact in hawb_df.columns) else col_zip_trim
+        if col_zip in hawb_df.columns:
+            hawb_df[col_zip] = hawb_df[col_zip].apply(enforce_zip_6_digits)
+
+        # 4) Drop recipient_state entirely
+        col_recipient_state = find_col(colmap, "recipient_state")
+        if col_recipient_state in hawb_df.columns:
+            hawb_df.drop(columns=[col_recipient_state], inplace=True)
+
+        # ---- Write back with visibility/active-sheet guards ----
+        ensure_at_least_one_visible_and_active(wb)  # before any save
+
+        # Save current edited wb (with mawb updated) to bytes
+        base = io.BytesIO()
+        wb.save(base)
+
+        # Now open with pandas' ExcelWriter and replace hawb
+        out_io = io.BytesIO()
+        with pd.ExcelWriter(out_io, engine="openpyxl") as writer:
+            writer.book = load_workbook(io.BytesIO(base.getvalue()))
+            writer.sheets = {ws.title: ws for ws in writer.book.worksheets}
+
+            # If hawb exists, delete then write fresh
+            if "hawb" in writer.book.sheetnames:
+                del writer.book["hawb"]
+
+            # If deleting hawb leaves no visible sheets, create a temp
+            if not any(ws.sheet_state == "visible" for ws in writer.book.worksheets):
+                writer.book.create_sheet("TempVisible")
+            writer.book.active = 0
+
+            # Write new hawb
+            hawb_df.to_excel(writer, sheet_name="hawb", index=False)
+
+            # Clean up temp if created
+            if "TempVisible" in writer.book.sheetnames:
+                del writer.book["TempVisible"]
+
+            # Final safety: ensure visibility and set hawb active
+            for ws in writer.book.worksheets:
+                ws.sheet_state = "visible"
+            writer.book.active = max(0, writer.book.sheetnames.index("hawb"))
+
+            writer.save()
+
+        st.success("Conversion complete!")
+        st.download_button(
+            "Download converted file",
+            data=out_io.getvalue(),
+            file_name="converted.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        with st.expander("What was applied"):
+            st.write("""
+- Decrypted the workbook
+- **hawb**: used row 2 as headers; processed from row 3
+  - If `manufacture_name` length > 100 → kept first half
+  - If `manufacture_address` length > 225 → kept first half
+  - If `manufacture_state` length > 8 → kept first half
+  - Set `country_of_origin` and `manufacture_country` to `"CN"`
+  - If `manufacture_zip_code` (with or without trailing space) not exactly 6 digits → set to `"123456"`
+  - Dropped `recipient_state`
+- **mawb**: set **L2** to `2567704`
+""")
+
+    except msoffcrypto.exceptions.DecryptionError:
+        st.error("Decryption failed. Please verify the password.")
+    except Exception as e:
+        st.exception(e)
