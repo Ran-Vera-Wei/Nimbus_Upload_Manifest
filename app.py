@@ -1,4 +1,6 @@
 import io
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import msoffcrypto
@@ -13,8 +15,9 @@ st.markdown("""
 2. In **`hawb`**:
    - If `manufacture_name` (**BW**) length > 100, keep first half.
    - If `manufacture_address` (**BX**) length > 225, keep first half.
-   - If `Unnamed: 77` (approx **BZ**) length > 8, keep first half. *(optional rule)*
-   - **Fill missing `country_of_origin` (or `Unnamed: 63`) with `"CN"`** (treats NaN/empty/whitespace as missing).
+   - If `Unnamed: 77` (≈ **BZ**) length > 8, keep first half.
+   - Fill missing `country_of_origin` (or `Unnamed: 63`) with **"CN"**.
+   - **If `manufacture_zip_code` (or `Unnamed: 78`) is not exactly 6 digits, set to "123456".**
    - Remove `STATE` column if present; else drop unnamed column at index **23** (e.g., `Unnamed: 23`).
 3. In **`mawb`**:
    - Set **L2** (column `consignee_id_number`, row 2 in Excel UI) to **`2567704`**.
@@ -36,7 +39,7 @@ def decrypt_xlsx(uploaded_file, password: str) -> io.BytesIO:
     decrypted.seek(0)
     return decrypted
 
-def safe_get_col_by_name_or_index(df: pd.DataFrame, preferred_name: str, index_fallback: int | None):
+def safe_get_col_by_name_or_index(df: pd.DataFrame, preferred_name: str, index_fallback: Optional[int]):
     """
     Return a column name to use:
       - If preferred_name exists, use it.
@@ -45,7 +48,7 @@ def safe_get_col_by_name_or_index(df: pd.DataFrame, preferred_name: str, index_f
     """
     if preferred_name in df.columns:
         return preferred_name
-    if index_fallback is not None and 0 <= index_fallback < len(df.columns):
+    if index_fallback is not None and 0 <= int(index_fallback) < len(df.columns):
         return df.columns[int(index_fallback)]
     return None
 
@@ -59,6 +62,7 @@ with st.expander("Advanced (column fallbacks)"):
     bx_idx = st.number_input("Fallback index for BX (manufacture_address)", min_value=0, value=75, step=1)
     bz_idx = st.number_input("Fallback index for BZ (optional extra truncation)", min_value=0, value=77, step=1)
     coo_idx = st.number_input("Fallback index for country_of_origin (Unnamed: 63)", min_value=0, value=63, step=1)
+    zip_idx = st.number_input("Fallback index for manufacture_zip_code (Unnamed: 78)", min_value=0, value=78, step=1)
     unnamed_state_idx = st.number_input("Fallback index for STATE unnamed column (commonly Unnamed: 23)", min_value=0, value=23, step=1)
 
 if st.button("Process") and uploaded is not None and password:
@@ -95,7 +99,6 @@ if st.button("Process") and uploaded is not None and password:
             df_hawb[bz_col] = df_hawb[bz_col].apply(lambda x: truncate_half_if_over(x, 8))
 
         # ---- Fill missing country_of_origin with "CN" ----
-        # Try named first, then Unnamed: 63, then index fallback
         coo_col = safe_get_col_by_name_or_index(df_hawb, "country_of_origin", coo_idx)
         if coo_col is None:
             coo_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 63", coo_idx)
@@ -103,23 +106,22 @@ if st.button("Process") and uploaded is not None and password:
             df_hawb[coo_col] = df_hawb[coo_col].astype("string")
             df_hawb[coo_col] = df_hawb[coo_col].replace(r"^\s*$", pd.NA, regex=True)
             df_hawb[coo_col] = df_hawb[coo_col].fillna("CN")
-           
-        # ---- Fill manufacture_zip_code with "123456" if not 6 digits ----
-         zip_col = safe_get_col_by_name_or_index(df_hawb, "manufacture_zip_code", 78)
-         if zip_col is None:
-             zip_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 78", 78)
-         if zip_col in df_hawb.columns:
-             df_hawb[zip_col] = df_hawb[zip_col].astype("string")
-             # Treat non-6-digit values (including NaN/empty) as invalid
-             df_hawb[zip_col] = df_hawb[zip_col].replace(r"^\s*$", pd.NA, regex=True)
-             mask_invalid = ~df_hawb[zip_col].str.match(r"^\d{6}$", na=False)
-             df_hawb.loc[mask_invalid, zip_col] = "123456"
-        
+
+        # ---- Zip code rule: set "123456" if not exactly 6 digits ----
+        zip_col = safe_get_col_by_name_or_index(df_hawb, "manufacture_zip_code", zip_idx)
+        if zip_col is None:
+            zip_col = safe_get_col_by_name_or_index(df_hawb, "Unnamed: 78", zip_idx)
+        if zip_col in df_hawb.columns:
+            df_hawb[zip_col] = df_hawb[zip_col].astype("string")
+            df_hawb[zip_col] = df_hawb[zip_col].replace(r"^\s*$", pd.NA, regex=True)
+            mask_invalid = ~df_hawb[zip_col].str.match(r"^\d{6}$", na=False)
+            df_hawb.loc[mask_invalid, zip_col] = "123456"
+
         # ---- Remove STATE or unnamed column at index 23 ----
         to_drop = []
         if "STATE" in df_hawb.columns:
             to_drop.append("STATE")
-        if 0 <= unnamed_state_idx < len(df_hawb.columns):
+        if 0 <= int(unnamed_state_idx) < len(df_hawb.columns):
             fallback_colname = df_hawb.columns[int(unnamed_state_idx)]
             if (
                 fallback_colname in df_hawb.columns
@@ -138,7 +140,6 @@ if st.button("Process") and uploaded is not None and password:
 
         # Set L2 (Excel) => row index 0 in pandas for column 'consignee_id_number'
         if "consignee_id_number" not in df_mawb.columns:
-            # Create/ensure at least one row, then set value
             if len(df_mawb) == 0:
                 df_mawb = pd.DataFrame({"consignee_id_number": ["2567704"]})
             else:
