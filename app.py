@@ -17,7 +17,7 @@ st.markdown("""
 - `manufacture_state`: if length > 8 → keep first half
 - **Set all `country_of_origin` to "CN"**
 - **Set all `manufacture_country` to "CN"**
-- **Zip** (`manufacture_zip_code` or `Unnamed: 78`): if not exactly 6 digits → **"123456"**
+- **Zip** (`manufacture_zip_code`): if not exactly 6 digits → **"123456"**
 - Drop `recipient_state` column entirely
 
 **Rules (apply to `Mawb`):**
